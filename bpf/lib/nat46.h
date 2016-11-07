@@ -229,7 +229,7 @@ static inline int ipv6_prefix_match(struct in6_addr *addr,
  */
 static inline int ipv4_to_ipv6(struct __sk_buff *skb, struct iphdr *ip4,
 			       int nh_off, union v6addr *v6prefix_src,
-			       union v6addr *v6predix_dst)
+			       union v6addr *v6predix_dst, int lxcip_dst)
 {
 	struct ipv6hdr v6 = {};
 	struct iphdr v4;
@@ -255,7 +255,10 @@ static inline int ipv4_to_ipv6(struct __sk_buff *skb, struct iphdr *ip4,
 	v6.daddr.in6_u.u6_addr32[0] = v6predix_dst->p1;
 	v6.daddr.in6_u.u6_addr32[1] = v6predix_dst->p2;
 	v6.daddr.in6_u.u6_addr32[2] = v6predix_dst->p3;
-	v6.daddr.in6_u.u6_addr32[3] = htonl((ntohl(v6predix_dst->p4) & 0xFFFF0000) | (ntohl(v4.daddr) & 0xFFFF));
+	if (lxcip_dst)
+		v6.daddr.in6_u.u6_addr32[3] = v6predix_dst->p4;
+	else
+		v6.daddr.in6_u.u6_addr32[3] = htonl((ntohl(v6predix_dst->p4) & 0xFFFF0000) | (ntohl(v4.daddr) & 0xFFFF));
 
 	if (v4.protocol == IPPROTO_ICMP)
 		v6.nexthdr = IPPROTO_ICMPV6;

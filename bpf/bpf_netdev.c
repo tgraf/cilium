@@ -92,7 +92,7 @@ static inline __u32 derive_sec_ctx(struct __sk_buff *skb, const union v6addr *no
 #endif
 }
 
-static inline int handle_ipv6(struct __sk_buff *skb)
+static __inline__ int handle_ipv6(struct __sk_buff *skb)
 {
 	union v6addr node_ip = { . addr = ROUTER_IP };
 	void *data = (void *) (long) skb->data;
@@ -121,7 +121,23 @@ static inline int handle_ipv6(struct __sk_buff *skb)
 
 	if (likely(is_node_subnet(dst, &node_ip)))
 		return ipv6_local_delivery(skb, l3_off, l4_off, flowlabel, ip6, nexthdr);
+#ifdef ENABLE_NAT46
+	else {
+		if (unlikely((dst->p1 == 0) && (dst->p2 == 0) &&
+		    (dst->p3 == 0xFFFF0000))) {
+			union v6addr dp = NAT46_DST_PREFIX;
+			int ret;
 
+			ret = ipv6_to_ipv4(skb, 14, &dp, IPV4_GATEWAY);
+			if (IS_ERR(ret))
+				return ret;
+
+			skb->cb[CB_NAT46_STATE] = NAT64;
+			tail_call(skb, &cilium_calls, CILIUM_CALL_IPV4);
+			return DROP_MISSED_TAIL_CALL;
+		}
+	}
+#endif
 	return TC_ACT_OK;
 }
 
@@ -140,7 +156,7 @@ static inline __u32 derive_ipv4_sec_ctx(struct __sk_buff *skb, struct iphdr *ip4
 #endif
 }
 
-static inline int handle_ipv4(struct __sk_buff *skb)
+static __inline__ int handle_ipv4(struct __sk_buff *skb)
 {
 	void *data = (void *) (long) skb->data;
 	void *data_end = (void *) (long) skb->data_end;
@@ -162,27 +178,6 @@ static inline int handle_ipv4(struct __sk_buff *skb)
 		ret = ipv4_local_delivery(skb, ETH_HLEN, l4_off, secctx, ip4);
 		if (ret != DROP_NO_LXC)
 			return ret;
-	}
-#endif
-
-#ifdef ENABLE_NAT46
-	if (1) {
-		union v6addr sp = NAT46_SRC_PREFIX;
-		union v6addr dp = HOST_IP;
-		int ret;
-
-		if (data + sizeof(*ip) + ETH_HLEN > data_end)
-			return DROP_INVALID;
-
-		if ((ip->daddr & IPV4_MASK) != IPV4_RANGE)
-			return TC_ACT_OK;
-
-		ret = ipv4_to_ipv6(skb, ip4, 14, &sp, &dp);
-		if (IS_ERR(ret))
-			return ret;
-
-		proto = __constant_htons(ETH_P_IPV6);
-		skb->tc_index = 1;
 	}
 #endif
 
