@@ -18,6 +18,7 @@ package endpoint
 import (
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/policy"
+	"github.com/cilium/cilium/pkg/proxy"
 )
 
 // This interface defines the requirements for anybody owning policies
@@ -39,6 +40,9 @@ type Owner interface {
 
 	// Return the next available global identity
 	GetMaxLabelID() (policy.NumericIdentity, error)
+
+	// Must return proxy object
+	GetProxy() *proxy.Proxy
 
 	// Must synchronize endpoint object with datapath
 	WriteEndpoint(ep *Endpoint) error

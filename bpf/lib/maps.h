@@ -34,4 +34,7 @@ BPF_PROG_ARRAY(cilium_reserved_policy, CILIUM_MAP_RES_POLICY, PIN_GLOBAL_NS, RES
 /* Private map for internal tail calls */
 BPF_PROG_ARRAY(cilium_calls, CILIUM_MAP_CALLS, PIN_OBJECT_NS, CILIUM_CALL_SIZE);
 
+__BPF_MAP(cilium_proxy4, BPF_MAP_TYPE_HASH, 0, sizeof(struct proxy4_tbl_key),
+	  sizeof(struct proxy4_tbl_value), PIN_GLOBAL_NS, 8192);
+
 #endif

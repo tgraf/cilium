@@ -19,7 +19,6 @@
 #define __LIB_POLICY_H_
 
 #include "drop.h"
-#include "conntrack.h"
 
 #ifdef POLICY_ENFORCEMENT
 static inline int policy_can_access(void *map, struct __sk_buff *skb, __u32 src_label)
@@ -42,7 +41,6 @@ static inline int policy_can_access(void *map, struct __sk_buff *skb, __u32 src_
 #ifndef IGNORE_DROP
 	return DROP_POLICY;
 #endif
-
 allow:
 	return TC_ACT_OK;
 }

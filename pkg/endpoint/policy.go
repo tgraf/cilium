@@ -87,6 +87,50 @@ func (e *Endpoint) InvalidatePolicy() {
 	}
 }
 
+func (e *Endpoint) addRedirect(owner Owner, l4 *policy.L4Filter) (uint16, error) {
+	proxy := owner.GetProxy()
+	if proxy == nil {
+		return 0, fmt.Errorf("Can't redirect, proxy disabled")
+	}
+
+	id := fmt.Sprintf("%d:%s:%d", e.ID, l4.Protocol, l4.Port)
+	log.Debugf("Adding redirect %+v to endpoint %d", l4, e.ID)
+	r, err := proxy.CreateOrUpdateRedirect(l4, id, e)
+	if err != nil {
+		return 0, err
+	}
+
+	return r.ToPort, nil
+}
+
+func (e *Endpoint) removeRedirect(owner Owner, l4 *policy.L4Filter) error {
+	proxy := owner.GetProxy()
+	if proxy == nil {
+		return nil
+	}
+
+	id := fmt.Sprintf("%d:%s:%d", e.ID, l4.Protocol, l4.Port)
+	log.Debugf("Removing redirect %s from endpoint %d", id, e.ID)
+	return proxy.RemoveRedirect(id)
+}
+
+func (e *Endpoint) cleanUnusedRedirects(owner Owner, oldMap policy.L4PolicyMap, newMap policy.L4PolicyMap) {
+	for k, v := range oldMap {
+		if newMap != nil {
+			// Keep redirects which are also in the new policy
+			if _, ok := newMap[k]; ok {
+				continue
+			}
+		}
+
+		if v.Redirect != "" {
+			if err := e.removeRedirect(owner, &v); err != nil {
+				log.Warningf("error while removing proxy: %s", err)
+			}
+		}
+	}
+}
+
 // Must be called with endpointsMU held
 func (e *Endpoint) regenerateConsumable(owner Owner) (bool, error) {
 	c := e.Consumable
@@ -129,6 +173,12 @@ func (e *Endpoint) regenerateConsumable(owner Owner) (bool, error) {
 
 	tree.Mutex.RLock()
 	newL4policy := tree.ResolveL4Policy(&ctx)
+
+	if c.L4Policy != nil {
+		e.cleanUnusedRedirects(owner, c.L4Policy.Ingress, newL4policy.Ingress)
+		e.cleanUnusedRedirects(owner, c.L4Policy.Egress, newL4policy.Egress)
+	}
+
 	c.L4Policy = newL4policy
 
 	// Check access from reserved consumables first

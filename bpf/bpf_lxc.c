@@ -42,6 +42,7 @@
 #include "lib/drop.h"
 #include "lib/dbg.h"
 #include "lib/csum.h"
+#include "lib/conntrack.h"
 
 #define POLICY_ID ((LXC_ID << 16) | SECLABEL)
 
@@ -352,6 +353,8 @@ static inline int handle_ipv4(struct __sk_buff *skb)
 	struct lb4_key key = {};
 	struct ct_state ct_state_new = {};
 	struct ct_state ct_state_reply = {};
+	__be32 orig_dip;
+	__u16 dport;
 
 	if (data + sizeof(*ip4) + ETH_HLEN > data_end)
 		return DROP_INVALID;
@@ -389,6 +392,7 @@ static inline int handle_ipv4(struct __sk_buff *skb)
 	}
 
 	ct_state_new.orig_dport = key.dport;
+	orig_dip = tuple.addr;
 
 	if ((svc = lb4_lookup_service(skb, &key)) != NULL) {
 		ret = lb4_local(skb, l3_off, l4_off, &csum_off,
@@ -413,6 +417,8 @@ skip_service_lookup:
 	if (ret < 0)
 		return ret;
 
+	dport = tuple.dport;
+
 	switch (ret) {
 	case CT_NEW:
 		/* New connection implies that rev_nat_index remains untouched
@@ -423,6 +429,8 @@ skip_service_lookup:
 		ret = ct_create4(&CT_MAP4, &tuple, skb, 0, &ct_state_new);
 		if (IS_ERR(ret))
 			return ret;
+
+		ct_state_reply.proxy_port = ct_state_new.proxy_port;
 		break;
 
 	case CT_ESTABLISHED:
@@ -442,6 +450,33 @@ skip_service_lookup:
 
 	default:
 		return DROP_POLICY;
+	}
+
+	if (ct_state_reply.proxy_port) {
+		union macaddr host_mac = HOST_IFINDEX_MAC;
+		int ret;
+
+		ret = ipv4_redirect_to_host_port(skb, &csum_off, l4_off,
+						 ct_state_reply.proxy_port, dport,
+						 orig_dip, &tuple);
+		if (IS_ERR(ret))
+			return ret;
+
+		/* After L4 write in port mapping: revalidate for direct packet access */
+		data = (void *) (long) skb->data;
+		data_end = (void *) (long) skb->data_end;
+		ip4 = data + ETH_HLEN;
+		if (data + sizeof(*ip4) + ETH_HLEN > data_end)
+			return DROP_INVALID;
+
+		cilium_trace(skb, DBG_TO_HOST, skb->cb[CB_POLICY], 0);
+
+		ret = ipv4_l3(skb, l3_off, (__u8 *) &router_mac.addr, (__u8 *) &host_mac.addr, ip4);
+		if (ret != TC_ACT_OK)
+			return ret;
+
+		cilium_trace_capture(skb, DBG_CAPTURE_DELIVERY, HOST_IFINDEX);
+		return redirect(HOST_IFINDEX, 0);
 	}
 
 	/* After L4 write in port mapping: revalidate for direct packet access */
@@ -601,10 +636,11 @@ static inline int __inline__ ipv6_policy(struct __sk_buff *skb, int ifindex, __u
 	void *data = (void *) (long) skb->data;
 	void *data_end = (void *) (long) skb->data_end;
 	struct ipv6hdr *ip6 = data + ETH_HLEN;
-	struct csum_offset off = {};
+	struct csum_offset csum_off = {};
 	int ret, l4_off, verdict;
 	struct ct_state ct_state_reply = {};
 	struct ct_state ct_state_new = {};
+	__u16 dport;
 
 	if (data + sizeof(struct ipv6hdr) + ETH_HLEN > data_end)
 		return DROP_INVALID;
@@ -613,7 +649,7 @@ static inline int __inline__ ipv6_policy(struct __sk_buff *skb, int ifindex, __u
 	tuple.nexthdr = ip6->nexthdr;
 	ipv6_addr_copy(&tuple.addr, (union v6addr *) &ip6->saddr);
 	l4_off = ETH_HLEN + ipv6_hdrlen(skb, ETH_HLEN, &tuple.nexthdr);
-	csum_l4_offset_and_flags(tuple.nexthdr, &off);
+	csum_l4_offset_and_flags(tuple.nexthdr, &csum_off);
 
 	/* derive reverse NAT index and zero it. */
 	ct_state_new.rev_nat_index = ip6->daddr.s6_addr32[3] & 0xFFFF;
@@ -626,10 +662,10 @@ static inline int __inline__ ipv6_policy(struct __sk_buff *skb, int ifindex, __u
 		if (IS_ERR(ret))
 			return DROP_WRITE_ERROR;
 
-		if (off.offset) {
+		if (csum_off.offset) {
 			__u32 zero_nat = 0;
 			__be32 sum = csum_diff(&ct_state_new.rev_nat_index, 4, &zero_nat, 4, 0);
-			if (csum_l4_replace(skb, l4_off, &off, 0, sum, BPF_F_PSEUDO_HDR) < 0)
+			if (csum_l4_replace(skb, l4_off, &csum_off, 0, sum, BPF_F_PSEUDO_HDR) < 0)
 				return DROP_CSUM_L4;
 		}
 	}
@@ -638,10 +674,12 @@ static inline int __inline__ ipv6_policy(struct __sk_buff *skb, int ifindex, __u
 	if (ret < 0)
 		return ret;
 
+	dport = tuple.dport;
+
 	if (unlikely(ct_state_reply.rev_nat_index)) {
 		int ret2;
 
-		ret2 = lb6_rev_nat(skb, l4_off, &off,
+		ret2 = lb6_rev_nat(skb, l4_off, &csum_off,
 				   ct_state_reply.rev_nat_index, &tuple, 0);
 		if (IS_ERR(ret2))
 			return ret2;
@@ -649,6 +687,8 @@ static inline int __inline__ ipv6_policy(struct __sk_buff *skb, int ifindex, __u
 
 	/* Policy lookup is done on every packet to account for packets that
 	 * passed through the allowed consumer. */
+	/* FIXME: Add option to disable policy accounting and avoid policy
+	 * lookup if policy accounting is disabled */
 	verdict = policy_can_access(&POLICY_MAP, skb, src_label);
 	if (unlikely(ret == CT_NEW)) {
 		if (verdict != TC_ACT_OK)
@@ -658,6 +698,32 @@ static inline int __inline__ ipv6_policy(struct __sk_buff *skb, int ifindex, __u
 		ret = ct_create6(&CT_MAP6, &tuple, skb, 1, &ct_state_new);
 		if (IS_ERR(ret))
 			return ret;
+
+		ct_state_reply.proxy_port = ct_state_new.proxy_port;
+	}
+
+	if (ct_state_reply.proxy_port && (ret == CT_NEW || ret == CT_ESTABLISHED)) {
+		//union v6addr host_ip = HOST_IP;
+		//union v6addr lxc_ip = LXC_IP;
+		//__be32 sum;
+
+		if (l4_modify_port(skb, l4_off, TCP_DPORT_OFF, &csum_off,
+				   ct_state_reply.proxy_port, dport) < 0)
+			return DROP_WRITE_ERROR;
+
+#if 0
+		if (ipv6_store_daddr(skb, host_ip.addr, ETH_HLEN) < 0)
+			return DROP_WRITE_ERROR;
+		/* FIXME: Calculate the checksum fix in user space */
+		sum = csum_diff(lxc_ip.addr, 16, host_ip.addr, 16, 0);
+		if (csum_l4_replace(skb, l4_off, &csum_off, 0, sum, BPF_F_PSEUDO_HDR) < 0)
+			return DROP_CSUM_L4;
+#endif
+		/* Mark packet with PACKET_HOST and pass to host */
+		if (skb_change_type(skb, 0) < 0)
+			return DROP_WRITE_ERROR;
+
+		skb->cb[CB_IFINDEX] = 0;
 	}
 
 	return 0;
@@ -669,10 +735,11 @@ static inline int __inline__ ipv4_policy(struct __sk_buff *skb, int ifindex, __u
 	void *data = (void *) (long) skb->data;
 	void *data_end = (void *) (long) skb->data_end;
 	struct iphdr *ip4 = data + ETH_HLEN;
-	struct csum_offset off = {};
+	struct csum_offset csum_off = {};
 	int ret, verdict, l4_off;
 	struct ct_state ct_state_reply = {};
 	struct ct_state ct_state_new = {};
+	__u16 dport;
 
 	if (data + sizeof(*ip4) + ETH_HLEN > data_end)
 		return DROP_INVALID;
@@ -682,11 +749,14 @@ static inline int __inline__ ipv4_policy(struct __sk_buff *skb, int ifindex, __u
 	tuple.addr = ip4->saddr;
 
 	l4_off = ETH_HLEN + ipv4_hdrlen(ip4);
-	csum_l4_offset_and_flags(tuple.nexthdr, &off);
+	csum_l4_offset_and_flags(tuple.nexthdr, &csum_off);
 
 	ret = ct_lookup4(&CT_MAP4, &tuple, skb, l4_off, SECLABEL, 1, &ct_state_reply);
 	if (ret < 0)
 		return ret;
+
+	/* store dport because ct_create4() will invalidate it */
+	dport = tuple.dport;
 
 #ifdef LXC_NAT46
 	if (skb->cb[CB_NAT46_STATE] == NAT46) {
@@ -699,7 +769,7 @@ static inline int __inline__ ipv4_policy(struct __sk_buff *skb, int ifindex, __u
 		     !ct_state_reply.loopback)) {
 		int ret2;
 
-		ret2 = lb4_rev_nat(skb, ETH_HLEN, l4_off, &off,
+		ret2 = lb4_rev_nat(skb, ETH_HLEN, l4_off, &csum_off,
 				   &ct_state_reply, &tuple,
 				   REV_NAT_F_TUPLE_SADDR);
 		if (IS_ERR(ret2))
@@ -718,6 +788,26 @@ static inline int __inline__ ipv4_policy(struct __sk_buff *skb, int ifindex, __u
 		ret = ct_create4(&CT_MAP4, &tuple, skb, 1, &ct_state_new);
 		if (IS_ERR(ret))
 			return ret;
+
+		/* NOTE: tuple has been invalidated after this */
+
+		ct_state_reply.proxy_port = ct_state_new.proxy_port;
+	}
+
+	if (ct_state_reply.proxy_port && (ret == CT_NEW || ret == CT_ESTABLISHED)) {
+		__be32 orig_dip = LXC_IPV4;
+
+		ret = ipv4_redirect_to_host_port(skb, &csum_off, l4_off,
+						 ct_state_reply.proxy_port, dport,
+						 orig_dip, &tuple);
+		if (IS_ERR(ret))
+			return ret;
+
+		/* Mark packet with PACKET_HOST and redirect to host */
+		if (skb_change_type(skb, 0) < 0)
+			return DROP_WRITE_ERROR;
+
+		skb->cb[CB_IFINDEX] = 0;
 	}
 
 	return 0;
@@ -750,8 +840,14 @@ __section_tail(CILIUM_MAP_POLICY, LXC_ID) int handle_policy(struct __sk_buff *sk
 			return send_drop_notify_error(skb, ret, TC_ACT_SHOT);
 	}
 
+	ifindex = skb->cb[CB_IFINDEX];
+
 	cilium_trace_capture(skb, DBG_CAPTURE_DELIVERY, ifindex);
-	return redirect(ifindex, 0);
+
+	if (ifindex)
+		return redirect(ifindex, 0);
+	else
+		return TC_ACT_OK;
 }
 
 __section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_NAT64) int tail_ipv6_to_ipv4(struct __sk_buff *skb)

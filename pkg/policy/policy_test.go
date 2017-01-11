@@ -120,7 +120,7 @@ func (s *PolicyTestSuite) TestAllowRule(c *C) {
 	lblFoo := labels.NewLabel("io.cilium.foo", "", common.CiliumLabelSource)
 	lblBar := labels.NewLabel("io.cilium.bar", "", common.CiliumLabelSource)
 	lblBaz := labels.NewLabel("io.cilium.baz", "", common.CiliumLabelSource)
-	lblAll := labels.NewLabel(labels.ID_NAME_ALL, "", common.ReservedLabelSource)
+	lblAll := labels.NewLabel(ID_NAME_ALL, "", common.ReservedLabelSource)
 	allow := AllowRule{Action: ACCEPT, Label: *lblFoo}
 	deny := AllowRule{Action: DENY, Label: *lblFoo}
 	allowAll := AllowRule{Action: ACCEPT, Label: *lblAll}
@@ -147,7 +147,7 @@ func (s *PolicyTestSuite) TestTargetCoveredBy(c *C) {
 	lblBar := labels.NewLabel("io.cilium.bar", "", common.CiliumLabelSource)
 	lblBaz := labels.NewLabel("io.cilium.baz", "", common.CiliumLabelSource)
 	lblJoe := labels.NewLabel("io.cilium.user", "joe", "kubernetes")
-	lblAll := labels.NewLabel(labels.ID_NAME_ALL, "", common.ReservedLabelSource)
+	lblAll := labels.NewLabel(ID_NAME_ALL, "", common.ReservedLabelSource)
 
 	list1 := []labels.Label{*lblFoo}
 	list2 := []labels.Label{*lblBar, *lblBaz}

@@ -30,6 +30,8 @@ const (
 	DBG_CAPTURE_FROM_LB
 	DBG_CAPTURE_AFTER_V46
 	DBG_CAPTURE_AFTER_V64
+	DBG_CAPTURE_PROXY_PRE
+	DBG_CAPTURE_PROXY_POST
 )
 
 const (
@@ -69,6 +71,10 @@ const (
 	DBG_LB4_LOOPBACK_SNAT
 	DBG_LB4_LOOPBACK_SNAT_REV
 	DBG_CT_LOOKUP4
+	DBG_REV_PROXY_LOOKUP
+	DBG_REV_PROXY_FOUND
+	DBG_REV_PROXY_UPDATE
+	DBG_L4_POLICY
 )
 
 // must be in sync with <bpf/lib/conntrack.h>
@@ -98,6 +104,12 @@ func CtState(state int32) string {
 func CtInfo(arg1 uint32, arg2 uint32) string {
 	return fmt.Sprintf("sport=%d dport=%d nexthdr=%d flags=%d",
 		arg1>>16, arg1&0xFFFF, arg2>>8, arg2&0xFF)
+}
+
+func ProxyInfo(arg1 uint32, arg2 uint32) string {
+	sport := common.Swab16(uint16(arg1 >> 16))
+	dport := common.Swab16(uint16(arg1 & 0xFFFF))
+	return fmt.Sprintf("sport=%d dport=%d saddr=%x", sport, dport, arg2)
 }
 
 type DebugMsg struct {
@@ -178,6 +190,14 @@ func (n *DebugMsg) Dump(data []byte, prefix string) {
 		fmt.Printf("Loopback SNAT from=%x to=%x\n", n.Arg1, n.Arg2)
 	case DBG_LB4_LOOPBACK_SNAT_REV:
 		fmt.Printf("Loopback reverse SNAT from=%x to=%x\n", n.Arg1, n.Arg2)
+	case DBG_REV_PROXY_LOOKUP:
+		fmt.Printf("Reverse proxy lookup, %s\n", ProxyInfo(n.Arg1, n.Arg2))
+	case DBG_REV_PROXY_FOUND:
+		fmt.Printf("Reverse proxy entry found, orig-daddr=%x orig-dport=%d\n", n.Arg1, n.Arg2)
+	case DBG_REV_PROXY_UPDATE:
+		fmt.Printf("Reverse proxy updated, %s\n", ProxyInfo(n.Arg1, n.Arg2))
+	case DBG_L4_POLICY:
+		fmt.Printf("Resolved L4 policy to: %d / %d\n", common.Swab16(uint16(n.Arg1)), n.Arg2)
 	default:
 		fmt.Printf("Unknown message type=%d arg1=%d arg2=%d\n", n.SubType, n.Arg1, n.Arg2)
 	}
@@ -215,6 +235,10 @@ func (n *DebugCapture) Dump(dissect bool, data []byte, prefix string) {
 		fmt.Printf("Packet after nat46 ifindex %d\n", n.Arg1)
 	case DBG_CAPTURE_AFTER_V64:
 		fmt.Printf("Packet after nat64 ifindex %d\n", n.Arg1)
+	case DBG_CAPTURE_PROXY_PRE:
+		fmt.Printf("Packet to proxy port %d (Pre)\n", common.Swab16(uint16(n.Arg1)))
+	case DBG_CAPTURE_PROXY_POST:
+		fmt.Printf("Packet to proxy port %d (Post)\n", common.Swab16(uint16(n.Arg1)))
 	default:
 		fmt.Printf("Unknown message type=%d arg1=%d\n", n.SubType, n.Arg1)
 	}

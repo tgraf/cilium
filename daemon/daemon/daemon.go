@@ -41,6 +41,7 @@ import (
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
+	"github.com/cilium/cilium/pkg/proxy"
 
 	cniTypes "github.com/containernetworking/cni/pkg/types"
 	hb "github.com/containernetworking/cni/plugins/ipam/host-local/backend/allocator"
@@ -83,6 +84,11 @@ type Daemon struct {
 	ignoredContainers         map[string]int
 	ignoredMutex              sync.RWMutex
 	loopbackIPv4              net.IP
+	l7Proxy                   *proxy.Proxy
+}
+
+func (d *Daemon) GetProxy() *proxy.Proxy {
+	return d.l7Proxy
 }
 
 func (d *Daemon) WriteEndpoint(e *endpoint.Endpoint) error {
@@ -470,6 +476,9 @@ func NewDaemon(c *Config) (*Daemon, error) {
 	if d.conf.IsUIEnabled() {
 		d.ListenBuildUIEvents()
 	}
+
+	// FIXME: Make configurable
+	d.l7Proxy = proxy.NewProxy(10000, 20000)
 
 	if c.RestoreState {
 		if err := d.SyncState(common.CiliumPath, true); err != nil {
